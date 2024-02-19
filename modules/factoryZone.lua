@@ -149,6 +149,14 @@ function factoryZone.addFactoryZone(aZone)
 		aZone.lastDefendMeValue = trigger.misc.getUserFlag(aZone.defendMe)
 	end 
 	
+	aZone.maxAttackers = 5
+  if aZone:hasProperty("maxAttackers") then
+    aZone.maxAttackers = aZone:getStringFromZoneProperty("maxAttackers", 5 )
+  end
+  if aZone:hasProperty("trackWith:") then
+		aZone.trackWith = aZone:getStringFromZoneProperty("trackWith:", "<None>")
+  end
+
 	factoryZone.zones[aZone.name] = aZone 
 	factoryZone.verifyZone(aZone)
 end
@@ -264,6 +272,12 @@ function factoryZone.sendOutAttackers(aZone)
 		aZone:pollFlag(aZone.blueP, aZone.factoryMethod)
 	end
 	
+	if #factoryZone.spawnedAttackers >= aZone.maxAttackers then
+		if aZone.verbose or factoryZone.verbose then
+			trigger.action.outText("+++factZ: Number os Attackers exceeded at max( " .. aZone.maxAttackers .. " )", 30)
+		end 
+		return
+	end
 	-- step one: get the attackers 
 	local attackers = aZone.attackersRED;
 	if (aZone.owner == 2) then attackers = aZone.attackersBLUE end
@@ -276,6 +290,7 @@ function factoryZone.sendOutAttackers(aZone)
 	troopData.groupData = theData
 	troopData.orders = "attackOwnedZone" -- lazy coding! 
 	troopData.side = aZone.owner
+	troopData.zoneName = aZone.name
 	factoryZone.spawnedAttackers[theData.name] = troopData 
 	
 	-- submit them to ground troops handler as zoneseekers 
@@ -285,6 +300,10 @@ function factoryZone.sendOutAttackers(aZone)
 		troops.orders = "attackOwnedZone"
 		troops.side = aZone.owner
 		cfxGroundTroops.addGroundTroopsToPool(troops) -- hand off to ground troops
+    if aZone.trackWith then 
+      factoryZone.handoffTracking(theGroup, aZone)  -- hand off to trackGroup
+    end
+
 	else 
 		if factoryZone.verbose then 
 			trigger.action.outText("+++ Owned Zones: no ground troops module on send out attackers", 30)
@@ -519,10 +538,12 @@ function factoryZone.updateZoneProduction(aZone)
 			factoryZone.spawnDefenders(aZone)
 			-- now drop into attacking mode to produce attackers
 			nextState = "attacking"
+			-- instant execution
+ 			aZone.timeStamp = timer.getTime() - factoryZone.attackingTime
 		else 
 			nextState = "idle"
+ 			aZone.timeStamp = timer.getTime()
 		end
-		aZone.timeStamp = timer.getTime()
 	
 	elseif aZone.state == "idle" then
 		-- nothing to do, zone is effectively switched off.
@@ -664,6 +685,39 @@ function factoryZone.houseKeeping()
 	factoryZone.GC()
 end
 
+function factoryZone.handoffTracking(theGroup, theZone)
+-- note that this method works on theZone, not Spawner object
+  if not groupTracker then 
+    trigger.action.outText("+++factZ: <" .. theZone.name .. "> trackWith requires groupTracker module", 30) 
+    return 
+  end
+  local trackerName = theZone.trackWith
+
+  -- now assemble a list of all trackers
+  if factoryZone.verbose or theZone.verbose then 
+    trigger.action.outText("+++factZ: spawn pass-off: " .. trackerName, 30)
+  end 
+  
+  local trackerNames = {}
+  if dcsCommon.containsString(trackerName, ',') then
+    trackerNames = dcsCommon.splitString(trackerName, ',')
+  else 
+    table.insert(trackerNames, trackerName)
+  end
+  for idx, aTrk in pairs(trackerNames) do 
+    local theName = dcsCommon.trim(aTrk)
+--    if theName == "*" then theName = theZone.name end 
+    local theTracker = groupTracker.getTrackerByName(theName)
+    if not theTracker then 
+      trigger.action.outText("+++factZ: <" .. theZone.name .. ">: cannot find tracker named <".. theName .. ">", 30) 
+    else 
+      groupTracker.addGroupToTracker(theGroup, theTracker)
+       if factoryZone.verbose or theZone.verbose then 
+        trigger.action.outText("+++factZ: added " .. theGroup:getName() .. " to tracker " .. theName, 30)
+       end
+    end 
+  end 
+end
 
 --
 -- load / save data 
@@ -763,6 +817,7 @@ function factoryZone.loadData()
 		local gData = gdTroop.groupData 
 		local orders = gdTroop.orders 
 		local side = gdTroop.side 
+		local zoneName = gdTroop.zoneName
 		local cty = gData.cty 
 		local cat = gData.cat 
 		-- add to my own attacker queue so we can save later 
@@ -774,6 +829,11 @@ function factoryZone.loadData()
 			troops.orders = orders
 			troops.side = side
 			cfxGroundTroops.addGroundTroopsToPool(troops) -- hand off to ground troops
+      -- tracking
+      local zone = cfxZones.getZoneByName(zoneName)
+      if zone and zone.trackWith then 
+        factoryZone.handoffTracking(theGroup, zone)  -- hand off to trackGroup
+      end
 		end 
 	end
 	
