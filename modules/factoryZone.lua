@@ -35,6 +35,7 @@ factoryZone.defendingTime = 100 -- seconds until new defenders are produced
 factoryZone.attackingTime = 300 -- seconds until new attackers are produced 
 factoryZone.shockTime = 200 -- 'shocked' period of inactivity
 factoryZone.repairTime = 200 -- time until we raplace one lost unit, also repairs all other units to 100%  
+factoryZone.maxAttackers = 5 -- Maximum number of possible attackers
 
 -- persistence: all attackers we ever sent out.
 -- is regularly verified and cut to size via GC
@@ -149,13 +150,11 @@ function factoryZone.addFactoryZone(aZone)
 		aZone.lastDefendMeValue = trigger.misc.getUserFlag(aZone.defendMe)
 	end 
 	
-	aZone.maxAttackers = 5
-  if aZone:hasProperty("maxAttackers") then
-    aZone.maxAttackers = aZone:getStringFromZoneProperty("maxAttackers", 5 )
-  end
-  if aZone:hasProperty("trackWith:") then
-		aZone.trackWith = aZone:getStringFromZoneProperty("trackWith:", "<None>")
-  end
+	-- manage number of attackers.
+	aZone.curAttackersRED = 0
+	aZone.curAttackersBLUE = 0
+	aZone.maxAttackers = aZone:getStringFromZoneProperty("maxAttackers", factoryZone.maxAttackers )
+	aZone.trackWith    = aZone:getStringFromZoneProperty("trackWith:", "<None>")
 
 	factoryZone.zones[aZone.name] = aZone 
 	factoryZone.verifyZone(aZone)
@@ -272,12 +271,18 @@ function factoryZone.sendOutAttackers(aZone)
 		aZone:pollFlag(aZone.blueP, aZone.factoryMethod)
 	end
 	
-	if #factoryZone.spawnedAttackers >= aZone.maxAttackers then
+	if (aZone.owner == 1) and aZone.curAttackersRED >= aZone.maxAttackers then
 		if aZone.verbose or factoryZone.verbose then
-			trigger.action.outText("+++factZ: Number os Attackers exceeded at max( " .. aZone.maxAttackers .. " )", 30)
+			trigger.action.outText("+++factZ: Number of RED Attackers exceeded at max( " .. aZone.maxAttackers .. " )", 30)
 		end 
 		return
 	end
+  if (aZone.owner == 2) and aZone.curAttackersBLUE >= aZone.maxAttackers then
+    if aZone.verbose or factoryZone.verbose then
+      trigger.action.outText("+++factZ: Number of BLUE Attackers exceeded at max( " .. aZone.maxAttackers .. " )", 30)
+    end 
+    return
+  end
 	-- step one: get the attackers 
 	local attackers = aZone.attackersRED;
 	if (aZone.owner == 2) then attackers = aZone.attackersBLUE end
@@ -293,6 +298,12 @@ function factoryZone.sendOutAttackers(aZone)
 	troopData.zoneName = aZone.name
 	factoryZone.spawnedAttackers[theData.name] = troopData 
 	
+	--
+	if aZone.owner == 1 then
+	 aZone.curAttackersRED = aZone.curAttackersRED + 1
+	else
+	 aZone.curAttackersBLUE = aZone.curAttackersBLUE + 1
+	end
 	-- submit them to ground troops handler as zoneseekers 
 	-- and our groundTroops module will handle the rest 
 	if cfxGroundTroops then 
@@ -619,21 +630,43 @@ function factoryZone.updateZoneProduction(aZone)
 	aZone.state = nextState
 end
 
+function factoryZone.clearAttackers()
+  -- clear current number of attackers
+  for idx, theZone in pairs(factoryZone.zones) do 
+    theZone.curAttackersRED = 0
+    theZone.curAttackersBLUE = 0
+  end
+end
+
 function factoryZone.GC()
 	-- GC run. remove all my dead remembered troops
-	local before = #factoryZone.spawnedAttackers
 	local filteredAttackers = {}
+	local remain = 0
+	local removed = 0
 	for gName, gData in pairs (factoryZone.spawnedAttackers) do 
 		-- all we need to do is get the group of that name
 		-- and if it still returns units we are fine 
 		local gameGroup = Group.getByName(gName)
 		if gameGroup and gameGroup:isExist() and gameGroup:getSize() > 0 then 
 			filteredAttackers[gName] = gData
+			remain = remain + 1
+  		-- managed Attackers
+      local zoneOwner = gData.side
+      local zoneName  = gData.zoneName
+      local aZone = cfxZones.getZoneByName(zoneName)
+      if zoneOwener == 1 then -- RED
+        aZone.curAttackersRED = aZone.curAttackersRED + 1
+      end
+      if zoneOwener == 2 then -- BLUE
+        aZone.curAttackersBLUE = aZone.curAttackersBLUE + 1
+      end
+    else
+      removed = removed + 1
 		end
 	end
 	factoryZone.spawnedAttackers = filteredAttackers
 	if factoryZone.verbose then 
-		trigger.action.outText("owned zones GC ran: before <" .. before .. ">, after <" .. #factoryZone.spawnedAttackers .. ">", 30)
+		trigger.action.outText("owned zones GC ran: remain <" .. remain .. ">, removed <" .. removed .. ">", 30)
 	end
 end
 
@@ -682,6 +715,7 @@ end
 
 function factoryZone.houseKeeping()
 	timer.scheduleFunction(factoryZone.houseKeeping, {}, timer.getTime() + 5 * 60) -- every 5 minutes 
+	factoryZone.clearAttackers()
 	factoryZone.GC()
 end
 
@@ -804,7 +838,9 @@ function factoryZone.loadData()
 			theZone.owner = zData.owner 
 			theZone.factoryOwner = theZone.owner 
 			theZone.state = zData.state 
-
+			-- manage Attackers
+			theZone.curAttackersRED = 0
+			theZone.curAttackersBLUE = 0
 		else 
 			trigger.action.outText("factZ: load - data mismatch: cannot find zone <" .. zName .. ">, skipping zone.", 30)
 		end
@@ -820,9 +856,15 @@ function factoryZone.loadData()
 		local zoneName = gdTroop.zoneName
 		local cty = gData.cty 
 		local cat = gData.cat 
+		local theZone = cfxZones.getZoneByName(zoneName)
 		-- add to my own attacker queue so we can save later 
 		local dClone = dcsCommon.clone(gdTroop)
 		factoryZone.spawnedAttackers[gName] = dClone 
+		if side == 1 then -- RED
+		  theZone.curAttackersRED = theZone.curAttackersRED + 1
+		else -- BLUE
+		  theZone.curAttackersBLUE = theZone.curAttackersBLUE + 1
+		end
 		local theGroup = coalition.addGroup(cty, cat, gData)
 		if cfxGroundTroops then 
 			local troops = cfxGroundTroops.createGroundTroops(theGroup)
@@ -830,9 +872,8 @@ function factoryZone.loadData()
 			troops.side = side
 			cfxGroundTroops.addGroundTroopsToPool(troops) -- hand off to ground troops
       -- tracking
-      local zone = cfxZones.getZoneByName(zoneName)
-      if zone and zone.trackWith then 
-        factoryZone.handoffTracking(theGroup, zone)  -- hand off to trackGroup
+      if theZone and theZone.trackWith then 
+        factoryZone.handoffTracking(theGroup, theZone)  -- hand off to trackGroup
       end
 		end 
 	end
@@ -856,6 +897,7 @@ function factoryZone.readConfigZone(theZone)
 	end 
 	factoryZone.shockTime = theZone:getNumberFromZoneProperty("shockTime", 200)
 	factoryZone.repairTime = theZone:getNumberFromZoneProperty( "repairTime", 200)
+	factoryZone.maxAttackers = theZone:getNumberFromZoneProperty( "maxAttackers", 5 )
 	factoryZone.targetZones = "OWNED"
 
 end
